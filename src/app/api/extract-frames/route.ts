@@ -87,10 +87,17 @@ export async function POST(request: NextRequest) {
 		// Calculate frame extraction parameters
 		const totalFrames = Math.floor(duration * fps);
 		const frameInterval = Math.max(1, interval);
-		const framesToExtract = Math.min(
+		const requestedFrames = Math.min(
 			Math.floor(totalFrames / frameInterval),
 			maxFrames,
 		);
+		
+		// Safety limit to prevent JSON size issues - limit to 50 frames max
+		const framesToExtract = Math.min(requestedFrames, 50);
+		
+		if (requestedFrames > 50) {
+			console.warn(`[EXTRACT-FRAMES] Requested ${requestedFrames} frames, limiting to 50 to prevent JSON size issues`);
+		}
 
 		console.log(`[EXTRACT-FRAMES] Extraction plan:`, {
 			totalFrames,
@@ -128,10 +135,10 @@ export async function POST(request: NextRequest) {
 			console.log(`[EXTRACT-FRAMES] Extracting frame ${frameInfo.index + 1}/${framesToExtract} at ${frameInfo.timestamp.toFixed(2)}s...`);
 
 			try {
-				// Extract single frame at timestamp
+				// Extract single frame at timestamp with compression
 				const ffmpegStart = Date.now();
 				await execAsync(
-					`ffmpeg -i "${tempVideoPath}" -ss ${frameInfo.timestamp} -frames:v 1 -f image2 "${frameInfo.outputPath}"`,
+					`ffmpeg -i "${tempVideoPath}" -ss ${frameInfo.timestamp} -frames:v 1 -vf "scale=-1:720" -q:v 8 -f image2 "${frameInfo.outputPath}"`,
 				);
 				console.log(`[EXTRACT-FRAMES] FFmpeg extraction for frame ${frameInfo.index + 1} completed in ${Date.now() - ffmpegStart}ms`);
 
@@ -216,19 +223,31 @@ export async function POST(request: NextRequest) {
 			try {
 				await unlink(tempVideoPath);
 				console.log(`[EXTRACT-FRAMES] Cleaned up video file: ${tempVideoPath}`);
-			} catch (err) {
-				console.warn(`[EXTRACT-FRAMES] Failed to clean up video file: ${tempVideoPath}`, err);
+			} catch (err: any) {
+				if (err.code !== 'ENOENT') {
+					console.warn(`[EXTRACT-FRAMES] Failed to clean up video file: ${tempVideoPath}`, err);
+				}
 			}
 		}
 
+		// Clean up temporary frame files (same logic as success case)
+		let cleanedFiles = 0;
+		let skippedFiles = 0;
+		
 		for (const framePath of tempFramePaths) {
 			try {
 				await unlink(framePath);
-			} catch (err) {
-				console.warn(`[EXTRACT-FRAMES] Failed to clean up frame file: ${framePath}`, err);
+				cleanedFiles++;
+			} catch (err: any) {
+				if (err.code === 'ENOENT') {
+					// File doesn't exist (maybe extraction failed) - this is ok
+					skippedFiles++;
+				} else {
+					console.warn(`[EXTRACT-FRAMES] Failed to delete frame file during error cleanup: ${framePath}`, err);
+				}
 			}
 		}
-		console.log("[EXTRACT-FRAMES] Error cleanup completed");
+		console.log(`[EXTRACT-FRAMES] Error cleanup completed: ${cleanedFiles} files deleted, ${skippedFiles} files not found`);
 
 		return NextResponse.json(
 			{
