@@ -335,6 +335,7 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 			setCurrentStep("complete");
 
 			const totalTime = Date.now() - startTime;
+			const avgProcessingTime = allEditedFrames.length > 0 ? totalTime / allEditedFrames.length : 0;
 			console.log(`[VIDEO-EDITOR] 🎯 COMPLETE! Total pipeline time: ${totalTime}ms`);
 			console.log(`[VIDEO-EDITOR] Performance breakdown:`, {
 				totalFrames: extractedFrames.length,
