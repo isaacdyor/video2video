@@ -99,45 +99,71 @@ export async function POST(request: NextRequest) {
 			estimatedDurationCovered: `${(framesToExtract * frameInterval / fps).toFixed(2)}s of ${duration.toFixed(2)}s`,
 		});
 
-		const frames: FrameData[] = [];
 		const extractionStart = Date.now();
 
-		// Extract frames using FFmpeg
-		console.log(`[EXTRACT-FRAMES] Starting frame extraction (${framesToExtract} frames)...`);
+		// Extract frames using PARALLEL FFmpeg calls
+		console.log(`[EXTRACT-FRAMES] Starting PARALLEL frame extraction (${framesToExtract} frames)...`);
+		
+		// Pre-calculate all frame paths to avoid race conditions
+		const frameInfos = [];
 		for (let i = 0; i < framesToExtract; i++) {
-			const frameStart = Date.now();
 			const frameNumber = i * frameInterval;
 			const timestamp = frameNumber / fps;
 			const frameFilename = `frame_${videoId}_${i}.png`;
 			const frameOutputPath = join(tmpdir(), frameFilename);
-
-			console.log(`[EXTRACT-FRAMES] Extracting frame ${i + 1}/${framesToExtract} at ${timestamp.toFixed(2)}s...`);
-
-			// Extract single frame at timestamp
-			const ffmpegStart = Date.now();
-			await execAsync(
-				`ffmpeg -i "${tempVideoPath}" -ss ${timestamp} -frames:v 1 -f image2 "${frameOutputPath}"`,
-			);
-			console.log(`[EXTRACT-FRAMES] FFmpeg extraction for frame ${i + 1} completed in ${Date.now() - ffmpegStart}ms`);
-
-			// Read frame and convert to base64
-			const frameBuffer = await readFile(frameOutputPath);
-			const base64 = frameBuffer.toString("base64");
-
-			console.log(`[EXTRACT-FRAMES] Frame ${i + 1} processed: ${frameBuffer.length} bytes -> ${base64.length} base64 chars`);
-
-			frames.push({
+			
+			frameInfos.push({
 				index: i,
 				timestamp,
 				filename: frameFilename,
-				base64: `data:image/png;base64,${base64}`,
+				outputPath: frameOutputPath,
 			});
-
-			tempFramePaths.push(frameOutputPath);
-			console.log(`[EXTRACT-FRAMES] Frame ${i + 1} completed in ${Date.now() - frameStart}ms`);
+			
+			tempFramePaths.push(frameOutputPath); // Pre-populate cleanup array
 		}
 
-		console.log(`[EXTRACT-FRAMES] All ${framesToExtract} frames extracted in ${Date.now() - extractionStart}ms`);
+		// Create parallel extraction promises
+		const extractionPromises = frameInfos.map(async (frameInfo) => {
+			const frameStart = Date.now();
+			console.log(`[EXTRACT-FRAMES] Extracting frame ${frameInfo.index + 1}/${framesToExtract} at ${frameInfo.timestamp.toFixed(2)}s...`);
+
+			try {
+				// Extract single frame at timestamp
+				const ffmpegStart = Date.now();
+				await execAsync(
+					`ffmpeg -i "${tempVideoPath}" -ss ${frameInfo.timestamp} -frames:v 1 -f image2 "${frameInfo.outputPath}"`,
+				);
+				console.log(`[EXTRACT-FRAMES] FFmpeg extraction for frame ${frameInfo.index + 1} completed in ${Date.now() - ffmpegStart}ms`);
+
+				// Read frame and convert to base64
+				const frameBuffer = await readFile(frameInfo.outputPath);
+				
+				// Check buffer size to prevent "Invalid string length" errors
+				if (frameBuffer.length > 50 * 1024 * 1024) { // 50MB limit
+					console.warn(`[EXTRACT-FRAMES] Frame ${frameInfo.index + 1} is very large (${(frameBuffer.length / (1024 * 1024)).toFixed(2)} MB)`);
+				}
+				
+				const base64 = frameBuffer.toString("base64");
+
+				console.log(`[EXTRACT-FRAMES] Frame ${frameInfo.index + 1} processed: ${frameBuffer.length} bytes -> ${base64.length} base64 chars in ${Date.now() - frameStart}ms`);
+				
+				return {
+					index: frameInfo.index,
+					timestamp: frameInfo.timestamp,
+					filename: frameInfo.filename,
+					base64: `data:image/png;base64,${base64}`,
+				};
+			} catch (error) {
+				console.error(`[EXTRACT-FRAMES] Failed to extract frame ${frameInfo.index + 1}:`, error);
+				throw new Error(`Frame ${frameInfo.index + 1} extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			}
+		});
+
+		// Execute all frame extractions in parallel
+		console.log(`[EXTRACT-FRAMES] Processing ${framesToExtract} frames in parallel...`);
+		const frames = await Promise.all(extractionPromises);
+		
+		console.log(`[EXTRACT-FRAMES] All ${framesToExtract} frames extracted in parallel in ${Date.now() - extractionStart}ms`);
 
 		// Clean up temporary video file
 		console.log("[EXTRACT-FRAMES] Cleaning up temporary video file...");
@@ -148,14 +174,23 @@ export async function POST(request: NextRequest) {
 
 		// Clean up temporary frame files
 		console.log(`[EXTRACT-FRAMES] Cleaning up ${tempFramePaths.length} temporary frame files...`);
+		let cleanedFiles = 0;
+		let skippedFiles = 0;
+		
 		for (const framePath of tempFramePaths) {
 			try {
 				await unlink(framePath);
-			} catch (err) {
-				console.warn(`[EXTRACT-FRAMES] Failed to delete frame file: ${framePath}`, err);
+				cleanedFiles++;
+			} catch (err: any) {
+				if (err.code === 'ENOENT') {
+					// File doesn't exist (maybe extraction failed) - this is ok
+					skippedFiles++;
+				} else {
+					console.warn(`[EXTRACT-FRAMES] Failed to delete frame file: ${framePath}`, err);
+				}
 			}
 		}
-		console.log("[EXTRACT-FRAMES] Cleanup completed");
+		console.log(`[EXTRACT-FRAMES] Cleanup completed: ${cleanedFiles} files deleted, ${skippedFiles} files not found`);
 
 		const totalTime = Date.now() - startTime;
 		console.log(`[EXTRACT-FRAMES] ✅ SUCCESS: Frame extraction completed in ${totalTime}ms`);

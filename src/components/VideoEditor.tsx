@@ -30,11 +30,64 @@ export default function VideoEditor({
 	const [editedFrames, setEditedFrames] = useState<EditedFrame[]>([]);
 	const [currentEditingFrame, setCurrentEditingFrame] = useState<number>(-1);
 	
+	// Diff analysis data
+	const [detailedDiff, setDetailedDiff] = useState<string>("");
+	const [firstFrameEdited, setFirstFrameEdited] = useState<string>("");
+	
 	// Video URLs
 	const [editedVideoUrl, setEditedVideoUrl] = useState<string | null>(null);
 	const [originalVideoUrl] = useState<string>(() =>
 		URL.createObjectURL(videoFile),
 	);
+
+	// Helper function to process a frame using the detailed diff specification
+	const processFrameWithDiff = async (
+		frame: ExtractedFrame, 
+		frameIndex: number, 
+		detailedDiffSpec: string, 
+		originalPrompt: string
+	): Promise<EditedFrame> => {
+		console.log(`[VIDEO-EDITOR] Processing frame ${frameIndex + 1} with detailed diff...`);
+		
+		const diffBasedPrompt = `Apply the following detailed specification to this image:
+
+ORIGINAL REQUEST: "${originalPrompt}"
+
+DETAILED SPECIFICATION:
+${detailedDiffSpec}
+
+Apply these exact changes to the provided image. Follow the specification precisely to maintain consistency with the established pattern.`;
+
+		const frameStart = Date.now();
+		
+		const response = await fetch("/api/edit-frame", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				prompt: diffBasedPrompt,
+				imageUrls: [frame.base64],
+				outputFormat: "png",
+			}),
+		});
+
+		if (!response.ok) {
+			throw new Error(`Frame ${frameIndex + 1} processing failed: ${response.statusText}`);
+		}
+
+		const result = await response.json();
+		const editedUrl = result.images[0].url;
+		
+		const frameTime = Date.now() - frameStart;
+		console.log(`[VIDEO-EDITOR] ✅ Frame ${frameIndex + 1} processed in ${frameTime}ms`);
+
+		return {
+			index: frameIndex,
+			originalUrl: frame.base64,
+			editedUrl,
+		};
+	};
 
 	// Step 1: Extract frames from video
 	const handleExtractFrames = async () => {
@@ -94,10 +147,10 @@ export default function VideoEditor({
 		}
 	};
 
-	// Step 2: Process frames through AI
+	// Step 2: NEW WORKFLOW - Process frames through AI
 	const handleProcessFrames = async () => {
 		const startTime = Date.now();
-		console.log(`[VIDEO-EDITOR] 🤖 Starting AI frame processing at ${new Date().toISOString()}`);
+		console.log(`[VIDEO-EDITOR] 🚀 Starting NEW WORKFLOW: First frame → Diff analysis → Parallel processing`);
 		console.log(`[VIDEO-EDITOR] Processing ${extractedFrames.length} frames with prompt: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
 
 		setIsProcessing(true);
@@ -107,155 +160,163 @@ export default function VideoEditor({
 		setCurrentEditingFrame(0);
 
 		try {
-			const editor = createGeminiEditor((editProgress) => {
-				setProgress(editProgress);
-				if (editProgress.currentFrame !== undefined) {
-					setCurrentEditingFrame(editProgress.currentFrame);
-				}
+			// PHASE 1: Edit the first frame to establish the change
+			console.log(`[VIDEO-EDITOR] 📸 PHASE 1: Editing first frame to establish change...`);
+			setProgress({
+				current: 1,
+				total: extractedFrames.length + 2, // +1 for first frame, +1 for diff analysis
+				currentFrame: 0,
+				status: "processing",
+				message: "Editing first frame to establish change pattern...",
 			});
 
-			// Set up a callback to update edited frames as they complete
-			const processedFrames: EditedFrame[] = [];
-			const processingTimes: number[] = [];
-			
-			for (let i = 0; i < extractedFrames.length; i++) {
-				const frameStart = Date.now();
-				const frame = extractedFrames[i];
-				setCurrentEditingFrame(i);
-
-				console.log(`[VIDEO-EDITOR] Processing frame ${i + 1}/${extractedFrames.length} (timestamp: ${frame.timestamp.toFixed(2)}s)`);
-
-				// Prepare images and create semantic prompt
-				const imageUrls: string[] = [frame.base64];
-				let finalPrompt = "";
-
-				if (i === 0) {
-					// First frame - establish the style
-					finalPrompt = `Edit this video frame (frame ${i + 1} of ${extractedFrames.length}):
+			const firstFrame = extractedFrames[0];
+			const firstFramePrompt = `Edit this video frame:
 
 "${prompt}"
 
-This is the first frame - create a distinctive visual style that will be consistent throughout the video sequence.`;
+This is the first frame - apply the requested change clearly and distinctly.`;
 
-					console.log(`[VIDEO-EDITOR] Frame 1 using direct prompt`);
-				} else {
-					// Subsequent frames - generate semantic prompt using AI
-					console.log(`[VIDEO-EDITOR] Frame ${i + 1}: Generating semantic prompt...`);
-					const semanticPromptStart = Date.now();
+			console.log(`[VIDEO-EDITOR] Calling Gemini Image Edit for first frame...`);
+			const firstFrameStart = Date.now();
 
-					try {
-						const semanticResponse = await fetch("/api/generate-semantic-prompt", {
-							method: "POST",
-							headers: {
-								"Content-Type": "application/json",
-							},
-							body: JSON.stringify({
-								userPrompt: prompt,
-								currentFrameBase64: frame.base64,
-								previousEditedFrameUrl: processedFrames[i - 1].editedUrl,
-							}),
-						});
+			const firstFrameResponse = await fetch("/api/edit-frame", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					prompt: firstFramePrompt,
+					imageUrls: [firstFrame.base64],
+					outputFormat: "png",
+				}),
+			});
 
-						if (!semanticResponse.ok) {
-							throw new Error(`Semantic prompt generation failed: ${semanticResponse.statusText}`);
-						}
-
-						const semanticResult = await semanticResponse.json();
-						finalPrompt = semanticResult.semanticPrompt;
-						
-						// Also include previous frame for reference
-						imageUrls.push(processedFrames[i - 1].editedUrl);
-
-						const semanticTime = Date.now() - semanticPromptStart;
-						console.log(`[VIDEO-EDITOR] ✅ Semantic prompt generated in ${semanticTime}ms`);
-						console.log(`[VIDEO-EDITOR] Semantic prompt preview:`, finalPrompt.substring(0, 300) + '...');
-
-					} catch (semanticError) {
-						console.error(`[VIDEO-EDITOR] ❌ Semantic prompt generation failed:`, semanticError);
-						
-						// Fallback to the previous approach
-						finalPrompt = `Edit this video frame (frame ${i + 1} of ${extractedFrames.length}):
-
-"${prompt}"
-
-CONSISTENCY REQUIREMENTS:
-- This is part of a video sequence, so maintain visual consistency with previous frames
-- Apply the same editing style, color grading, effects, and overall aesthetic as established in the first frame
-- Keep the same visual treatment (lighting, contrast, saturation, etc.)
-- Ensure smooth visual continuity between frames
-- The editing style should look identical to how you edited the previous frames in this sequence
-
-Apply the requested edit while maintaining perfect visual consistency with the established style.`;
-
-						console.log(`[VIDEO-EDITOR] Using fallback prompt due to semantic generation failure`);
-					}
-				}
-
-				console.log(`[VIDEO-EDITOR] Frame ${i + 1} setup:`, {
-					imageCount: imageUrls.length,
-					hasReference: i > 0,
-					promptLength: finalPrompt.length,
-					isSemanticPrompt: i > 0
-				});
-				console.log(`[VIDEO-EDITOR] Calling Gemini Image Edit API for frame ${i + 1}...`);
-				const apiStart = Date.now();
-
-				// Call the API
-				const response = await fetch("/api/edit-frame", {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify({
-						prompt: finalPrompt,
-						imageUrls,
-						outputFormat: "png",
-					}),
-				});
-
-				if (!response.ok) {
-					console.error(`[VIDEO-EDITOR] ❌ API request failed for frame ${i + 1}: ${response.status} ${response.statusText}`);
-					throw new Error(`API request failed: ${response.statusText}`);
-				}
-
-				const result = await response.json();
-				const editedUrl = result.images[0].url;
-				const apiTime = Date.now() - apiStart;
-				
-				console.log(`[VIDEO-EDITOR] ✅ Frame ${i + 1} edited in ${apiTime}ms`);
-				console.log(`[VIDEO-EDITOR] Gemini response:`, {
-					imageUrl: editedUrl.substring(0, 100) + '...',
-					description: result.description?.substring(0, 200) + (result.description?.length > 200 ? '...' : ''),
-				});
-
-				const editedFrame: EditedFrame = {
-					index: frame.index,
-					originalUrl: frame.base64,
-					editedUrl,
-				};
-
-				processedFrames.push(editedFrame);
-				processingTimes.push(Date.now() - frameStart);
-				
-				// Update state to show the newly edited frame
-				setEditedFrames([...processedFrames]);
-				
-				const totalFrameTime = Date.now() - frameStart;
-				console.log(`[VIDEO-EDITOR] Frame ${i + 1} completed in ${totalFrameTime}ms (API: ${apiTime}ms)`);
+			if (!firstFrameResponse.ok) {
+				throw new Error(`First frame editing failed: ${firstFrameResponse.statusText}`);
 			}
 
-			const avgProcessingTime = processingTimes.reduce((a, b) => a + b, 0) / processingTimes.length;
-			console.log(`[VIDEO-EDITOR] ✅ All frames processed! Average time per frame: ${avgProcessingTime.toFixed(0)}ms`);
+			const firstFrameResult = await firstFrameResponse.json();
+			const firstFrameEditedUrl = firstFrameResult.images[0].url;
+			setFirstFrameEdited(firstFrameEditedUrl);
+
+			console.log(`[VIDEO-EDITOR] ✅ First frame edited in ${Date.now() - firstFrameStart}ms`);
+
+			// Add the first frame to edited frames
+			const firstEditedFrame: EditedFrame = {
+				index: 0,
+				originalUrl: firstFrame.base64,
+				editedUrl: firstFrameEditedUrl,
+			};
+			setEditedFrames([firstEditedFrame]);
+
+			// PHASE 2: Analyze the diff to create detailed specification
+			console.log(`[VIDEO-EDITOR] 🔍 PHASE 2: Analyzing diff to create detailed specification...`);
+			setProgress({
+				current: 2,
+				total: extractedFrames.length + 2,
+				currentFrame: 0,
+				status: "processing",
+				message: "Analyzing changes to create detailed specification...",
+			});
+
+			console.log(`[VIDEO-EDITOR] Calling diff analysis API...`);
+			const diffAnalysisStart = Date.now();
+
+			const diffResponse = await fetch("/api/analyze-diff", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					originalPrompt: prompt,
+					originalFrameBase64: firstFrame.base64,
+					editedFrameUrl: firstFrameEditedUrl,
+				}),
+			});
+
+			if (!diffResponse.ok) {
+				throw new Error(`Diff analysis failed: ${diffResponse.statusText}`);
+			}
+
+			const diffResult = await diffResponse.json();
+			const detailedDiffSpec = diffResult.detailedDiff;
+			setDetailedDiff(detailedDiffSpec);
+
+			console.log(`[VIDEO-EDITOR] ✅ Diff analysis completed in ${Date.now() - diffAnalysisStart}ms`);
+			console.log(`[VIDEO-EDITOR] Generated detailed diff specification (${detailedDiffSpec.length} chars):`, 
+				detailedDiffSpec.substring(0, 200) + '...'
+			);
+
+			// PHASE 3: Process remaining frames IN PARALLEL using the detailed diff
+			let allEditedFrames = [firstEditedFrame]; // Initialize with first frame
+			
+			if (extractedFrames.length > 1) {
+				console.log(`[VIDEO-EDITOR] 🚀 PHASE 3: Processing remaining ${extractedFrames.length - 1} frames in PARALLEL...`);
+				
+				const remainingFrames = extractedFrames.slice(1); // Skip first frame
+				let completedFrames = 0;
+
+				// Process frames with streaming updates
+				const processFrameWithStreaming = async (frame: ExtractedFrame, frameIndex: number) => {
+					try {
+						const result = await processFrameWithDiff(frame, frameIndex, detailedDiffSpec, prompt);
+						completedFrames++;
+						
+						// Update UI immediately when this frame completes
+						allEditedFrames.push(result);
+						setEditedFrames([...allEditedFrames]); // Create new array to trigger re-render
+						
+						// Update progress for this individual frame
+						setProgress({
+							current: 2 + completedFrames,
+							total: extractedFrames.length + 2,
+							currentFrame: frameIndex,
+							status: "processing",
+							message: `Processing frame ${frameIndex + 1}/${extractedFrames.length} (${completedFrames}/${remainingFrames.length} parallel frames complete)`,
+						});
+						
+						console.log(`[VIDEO-EDITOR] ✅ Frame ${frameIndex} completed (${completedFrames}/${remainingFrames.length})`);
+						return result;
+					} catch (error) {
+						console.error(`[VIDEO-EDITOR] ❌ Frame ${frameIndex} failed:`, error);
+						throw error;
+					}
+				};
+
+				// Create parallel processing promises with streaming updates
+				const parallelPromises = remainingFrames.map((frame, i) => 
+					processFrameWithStreaming(frame, i + 1)
+				);
+
+				// Process all frames in parallel
+				console.log(`[VIDEO-EDITOR] 🔄 Processing ${remainingFrames.length} frames in parallel...`);
+				const parallelStart = Date.now();
+				
+				await Promise.all(parallelPromises);
+				
+				console.log(`[VIDEO-EDITOR] ✅ All ${remainingFrames.length} frames processed in parallel in ${Date.now() - parallelStart}ms`);
+
+				// Final progress update
+				setProgress({
+					current: extractedFrames.length + 2,
+					total: extractedFrames.length + 2,
+					status: "processing",
+					message: "All frames processed! Preparing for video assembly...",
+				});
+			}
 
 			// Step 3: Reassemble video
 			console.log(`[VIDEO-EDITOR] 🎥 Starting video reassembly...`);
 			setCurrentStep("reassembling");
 
-			// Convert edited frames to the format needed for reassembly
-			const editedFramesForReassembly = processedFrames.map(frame => ({
+			// Convert edited frames to the format needed for reassembly - use local allEditedFrames array
+			const editedFramesForReassembly = allEditedFrames.map(frame => ({
 				index: frame.index,
 				url: frame.editedUrl,
 			}));
+
+			console.log(`[VIDEO-EDITOR] Using ${allEditedFrames.length} frames for reassembly (vs ${editedFrames.length} in state)`);
 
 			console.log(`[VIDEO-EDITOR] Calling video reassembly API with ${editedFramesForReassembly.length} frames...`);
 			const reassemblyStart = Date.now();
@@ -319,6 +380,8 @@ Apply the requested edit while maintaining perfect visual consistency with the e
 		setExtractedFrames([]);
 		setEditedFrames([]);
 		setEditedVideoUrl(null);
+		setDetailedDiff("");
+		setFirstFrameEdited("");
 		setError(null);
 		setProgress(null);
 	};
@@ -335,9 +398,13 @@ Apply the requested edit while maintaining perfect visual consistency with the e
 			setExtractedFrames([]);
 			setEditedFrames([]);
 			setEditedVideoUrl(null);
+			setDetailedDiff("");
+			setFirstFrameEdited("");
 		} else if (step === "preview-frames") {
 			setEditedFrames([]);
 			setEditedVideoUrl(null);
+			setDetailedDiff("");
+			setFirstFrameEdited("");
 		} else if (step === "editing") {
 			setEditedVideoUrl(null);
 		}
@@ -351,6 +418,56 @@ Apply the requested edit while maintaining perfect visual consistency with the e
 	const handleModifyPrompt = () => {
 		console.log(`[VIDEO-EDITOR] 🔄 Going back to modify prompt`);
 		handleGoToStep("preview-frames");
+	};
+
+	const handleManualAssemble = async () => {
+		if (editedFrames.length === 0) {
+			console.error("[VIDEO-EDITOR] No edited frames available for assembly");
+			return;
+		}
+
+		console.log(`[VIDEO-EDITOR] 🎬 Manual video assembly with ${editedFrames.length} frames`);
+		setCurrentStep("reassembling");
+		setIsProcessing(true);
+
+		try {
+			// Convert edited frames to the format needed for reassembly
+			const editedFramesForReassembly = editedFrames.map(frame => ({
+				index: frame.index,
+				url: frame.editedUrl,
+			}));
+
+			console.log(`[VIDEO-EDITOR] Calling video reassembly API with ${editedFramesForReassembly.length} frames...`);
+			const reassemblyStart = Date.now();
+
+			const videoProcessor = createVideoProcessor();
+			const editedVideo = await videoProcessor.reassembleVideo(editedFramesForReassembly, {
+				fps: 30,
+				outputFormat: "mp4",
+			});
+
+			console.log(`[VIDEO-EDITOR] ✅ Video reassembly completed in ${Date.now() - reassemblyStart}ms`);
+			console.log(`[VIDEO-EDITOR] Final video size: ${(editedVideo.size / (1024 * 1024)).toFixed(2)} MB`);
+
+			// Create download URL
+			const url = URL.createObjectURL(editedVideo);
+			setEditedVideoUrl(url);
+			setCurrentStep("complete");
+
+			setProgress({
+				current: extractedFrames.length + 3,
+				total: extractedFrames.length + 3,
+				status: "complete",
+				message: "Video editing complete!",
+			});
+
+		} catch (error) {
+			console.error("[VIDEO-EDITOR] Manual assembly failed:", error);
+			setError(`Manual assembly failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+			setCurrentStep("editing"); // Go back to editing step
+		} finally {
+			setIsProcessing(false);
+		}
 	};
 
 	return (
@@ -636,9 +753,29 @@ Apply the requested edit while maintaining perfect visual consistency with the e
 								</div>
 							</div>
 
+							{/* Show detailed diff if available */}
+							{detailedDiff && (
+								<div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+									<h4 className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2 flex items-center gap-2">
+										🔍 Generated Detailed Specification
+									</h4>
+									<div className="text-xs text-blue-800 dark:text-blue-200 bg-white dark:bg-gray-800 p-3 rounded border max-h-40 overflow-y-auto">
+										<pre className="whitespace-pre-wrap font-mono text-xs">
+											{detailedDiff.length > 500 ? 
+												detailedDiff.substring(0, 500) + '\n\n... [truncated, full spec used for processing]' : 
+												detailedDiff
+											}
+										</pre>
+									</div>
+									<p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
+										This specification is being applied to all remaining frames in parallel.
+									</p>
+								</div>
+							)}
+
 							{/* Navigation Controls During Editing */}
 							{!isProcessing && (
-								<div className="mt-6 flex gap-4">
+								<div className="mt-6 flex flex-wrap gap-4">
 									<button
 										onClick={() => handleGoToStep("preview-frames")}
 										className="border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 px-4 py-2 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors font-medium"
@@ -657,6 +794,14 @@ Apply the requested edit while maintaining perfect visual consistency with the e
 									>
 										✏️ Modify Prompt
 									</button>
+									{editedFrames.length > 0 && (
+										<button
+											onClick={handleManualAssemble}
+											className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors font-medium"
+										>
+											🎬 Assemble Video Now
+										</button>
+									)}
 								</div>
 							)}
 						</div>
