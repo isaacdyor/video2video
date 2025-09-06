@@ -10,9 +10,12 @@
     "format": "biome format --write"
   },
   "dependencies": {
+    "@fal-ai/client": "^1.6.2",
+    "@google/generative-ai": "^0.24.1",
+    "ai": "^5.0.34",
+    "next": "15.5.2",
     "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "next": "15.5.2"
+    "react-dom": "19.1.0"
   },
   "devDependencies": {
     "typescript": "^5",
