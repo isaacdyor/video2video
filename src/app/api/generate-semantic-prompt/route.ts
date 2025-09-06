@@ -51,45 +51,40 @@ export async function POST(request: NextRequest) {
 
 		console.log("[GENERATE-SEMANTIC-PROMPT] Both images ready, calling Gemini 2.5 Pro...");
 
-		// Create the meta-prompt
-		const metaPrompt = `You are an expert image editing analyst. Your job is to create precise editing instructions for an AI image editor.
+		// Create the meta-prompt focused on merging specific elements
+		const metaPrompt = `You are an expert image merging analyst. Your job is to create precise MERGE instructions for an AI image editor that specializes in combining elements from multiple images.
 
 CONTEXT: The user requested this edit: "${userPrompt}"
 
 You are analyzing two images from a video sequence:
-- One image already has the user's requested edit successfully applied
-- One image is the original that still needs the edit applied
+- One image shows the DESIRED EFFECT/CHANGE already applied (the edited version)
+- One image shows the NEW POSITION/SCENE that needs the effect applied (the current frame)
 
 YOUR ANALYSIS PROCESS:
 
-STEP 1 - UNDERSTAND THE USER'S INTENT:
-What does "${userPrompt}" mean? What should the final result look like?
+STEP 1 - IDENTIFY THE SPECIFIC CHANGE:
+What exactly did "${userPrompt}" change in the edited image? (hair style, lighting, objects, colors, effects, etc.)
 
-STEP 2 - IDENTIFY WHICH IMAGE IS WHICH:
-Examine both images carefully:
-- Which image already demonstrates the successful result of "${userPrompt}"?
-- Which image is in the original state before "${userPrompt}" was applied?
+STEP 2 - IDENTIFY SOURCE vs TARGET:
+- SOURCE IMAGE: Which image contains the desired change/effect from "${userPrompt}"?
+- TARGET IMAGE: Which image has the position/pose/scene where this change should be applied?
 
-STEP 3 - CREATE SEMANTIC DESCRIPTIONS:
-REFERENCE IMAGE (already edited): Describe the visual characteristics that show the completed edit
-TARGET IMAGE (needs editing): Describe its current unedited state
+STEP 3 - CREATE MERGE INSTRUCTION:
+Follow this exact pattern focused on MERGING:
 
-STEP 4 - GENERATE EDITING INSTRUCTION:
-Follow this exact pattern:
-
-"You are editing a video frame. You see two images: one shows [detailed REFERENCE description with completed edit], and one shows [detailed TARGET description in original state]. Your task is to edit the [TARGET semantic description] to achieve [specific visual changes] exactly like shown in the [REFERENCE semantic description]. You are ONLY modifying the [TARGET description], using the reference as a visual guide. Apply the same [specific effects/changes] to transform the target image."
+"You have two images to merge: one shows [describe the specific CHANGE/EFFECT from the source], and one shows [describe the TARGET POSITION/SCENE]. Merge the [specific visual elements] from the first image onto the positioning and scene of the second image. Take the [exact change description] and apply it to the [target scene description]. The result should combine the [source effect] with the [target positioning]."
 
 CRITICAL REQUIREMENTS:
-- Use semantic descriptions of visual content, never positions
-- Make it absolutely clear which image to edit vs reference
-- Specify exactly what visual elements to transfer/apply
-- Ensure the instruction will reproduce the user's original request
-- Be precise about the transformation needed
+- Focus on MERGING specific elements, not "using as reference"
+- Be explicit about what gets taken from each image
+- Use "merge", "combine", "take from X and apply to Y" language
+- Specify the exact visual elements being transferred
+- Make it clear this is a combination, not editing with reference
 
 Example for "give this guy long hair":
-"You are editing a video frame. You see two images: one shows a man with flowing long hair reaching his shoulders, and one shows the same man with a short cropped haircut. Your task is to edit the man with short hair to have flowing long hair exactly like shown in the reference image of the man with long hair. You are ONLY modifying the short-haired man, using the long-haired reference as a visual guide. Apply the same hair length and style to transform the target image."
+"You have two images to merge: one shows a man with long flowing hair, and one shows a man with short hair in a different pose. Merge the long hair from the first image onto the head and positioning of the man with short hair. Take the hair length, style, and flow from the long-haired man and apply it to the short-haired man's head position. The result should combine the long hair style with the short-haired man's exact pose and scene."
 
-Generate your editing instruction:`;
+Generate your merge instruction:`;
 
 		// Prepare images for Gemini
 		const currentFrameImagePart = {
