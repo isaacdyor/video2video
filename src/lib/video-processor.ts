@@ -29,13 +29,15 @@ class VideoProcessor {
 		frames: ExtractedFrame[];
 		metadata: VideoMetadata;
 	}> {
-		const { interval = 30, maxFrames = 10 } = options;
+		const { interval = 1, maxFrames } = options;
 
 		// Create FormData for file upload
 		const formData = new FormData();
 		formData.append("video", videoFile);
 		formData.append("interval", interval.toString());
-		formData.append("maxFrames", maxFrames.toString());
+		if (maxFrames !== undefined) {
+			formData.append("maxFrames", maxFrames.toString());
+		}
 
 		// Call server-side frame extraction API
 		const response = await fetch("/api/extract-frames", {

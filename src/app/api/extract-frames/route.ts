@@ -28,8 +28,8 @@ export async function POST(request: NextRequest) {
     console.log("[EXTRACT-FRAMES] Parsing request data...");
     const formData = await request.formData();
     const file = formData.get("video") as File;
-    const interval = Number(formData.get("interval") || 30);
-    const maxFrames = Number(formData.get("maxFrames") || 10);
+    const interval = Number(formData.get("interval") || 1);
+    const maxFrames = formData.get("maxFrames") ? Number(formData.get("maxFrames")) : undefined;
 
     console.log(`[EXTRACT-FRAMES] Request parameters:`, {
       filename: file?.name,
@@ -97,17 +97,15 @@ export async function POST(request: NextRequest) {
     // Calculate frame extraction parameters
     const totalFrames = Math.floor(duration * fps);
     const frameInterval = Math.max(1, interval);
-    const requestedFrames = Math.min(
-      Math.floor(totalFrames / frameInterval),
-      maxFrames
-    );
+    const maxPossibleFrames = Math.floor(totalFrames / frameInterval);
+    const requestedFrames = maxFrames ? Math.min(maxPossibleFrames, maxFrames) : maxPossibleFrames;
 
-    // Safety limit to prevent JSON size issues - limit to 50 frames max
-    const framesToExtract = requestedFrames;
+    // Safety limit to prevent JSON size issues - limit to 200 frames max for stability
+    const framesToExtract = Math.min(requestedFrames, 200);
 
-    if (requestedFrames > 50) {
+    if (requestedFrames > 200) {
       console.warn(
-        `[EXTRACT-FRAMES] Requested ${requestedFrames} frames, limiting to 50 to prevent JSON size issues`
+        `[EXTRACT-FRAMES] Requested ${requestedFrames} frames, limiting to 200 to prevent memory issues`
       );
     }
 

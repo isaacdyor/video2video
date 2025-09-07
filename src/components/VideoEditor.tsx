@@ -19,8 +19,9 @@ export default function VideoEditor({
 }: VideoEditorProps) {
 	const [currentStep, setCurrentStep] = useState<ProcessingStep>("setup");
 	const [prompt, setPrompt] = useState("");
-	const [frameInterval, setFrameInterval] = useState(30);
-	const [maxFrames, setMaxFrames] = useState(10);
+	const [frameInterval, setFrameInterval] = useState(1);
+	const [maxFrames, setMaxFrames] = useState<number | null>(null);
+	const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 	const [isProcessing, setIsProcessing] = useState(false);
 	const [progress, setProgress] = useState<EditProgress | null>(null);
 	const [error, setError] = useState<string | null>(null);
@@ -40,17 +41,13 @@ export default function VideoEditor({
 		URL.createObjectURL(videoFile),
 	);
 
-	// Auto-advance from preview-frames to editing when frames are extracted
+	// Auto-start processing when frames are extracted and we're in editing step
 	useEffect(() => {
-		if (currentStep === "preview-frames" && extractedFrames.length > 0 && !isProcessing) {
-			console.log(`[VIDEO-EDITOR] 🚀 Auto-advancing to editing step`);
-			const timer = setTimeout(() => {
-				handleProcessFrames();
-			}, 500);
-			
-			return () => clearTimeout(timer);
+		if (currentStep === "editing" && extractedFrames.length > 0 && !isProcessing && editedFrames.length === 0) {
+			console.log(`[VIDEO-EDITOR] 🚀 Auto-starting frame processing with ${extractedFrames.length} frames`);
+			handleProcessFrames();
 		}
-	}, [currentStep, extractedFrames.length, isProcessing]);
+	}, [currentStep, extractedFrames.length, isProcessing, editedFrames.length]);
 
 	// Helper function to process a frame using the detailed diff specification
 	const processFrameWithDiff = async (
@@ -61,14 +58,17 @@ export default function VideoEditor({
 	): Promise<EditedFrame> => {
 		console.log(`[VIDEO-EDITOR] Processing frame ${frameIndex + 1} with detailed diff...`);
 		
-		const diffBasedPrompt = `Apply the following detailed specification to this image:
+		// Truncate the detailed diff if it's too long to fit within the 2000 char limit
+		const maxDiffLength = 1500 - originalPrompt.length; // Leave room for other text
+		const truncatedDiff = detailedDiffSpec.length > maxDiffLength 
+			? detailedDiffSpec.substring(0, maxDiffLength) + "... [truncated]"
+			: detailedDiffSpec;
+			
+		const diffBasedPrompt = `Apply this specification: "${originalPrompt}"
 
-ORIGINAL REQUEST: "${originalPrompt}"
+Details: ${truncatedDiff}
 
-DETAILED SPECIFICATION:
-${detailedDiffSpec}
-
-Apply these exact changes to the provided image. Follow the specification precisely to maintain consistency with the established pattern.`;
+Apply these changes precisely to maintain consistency.`;
 
 		const frameStart = Date.now();
 		
@@ -113,7 +113,7 @@ Apply these exact changes to the provided image. Follow the specification precis
 		console.log(`[VIDEO-EDITOR] Extraction settings:`, {
 			prompt: prompt.substring(0, 100) + (prompt.length > 100 ? '...' : ''),
 			frameInterval,
-			maxFrames,
+			maxFrames: maxFrames || 'unlimited',
 		});
 
 		if (!prompt.trim()) {
@@ -136,7 +136,7 @@ Apply these exact changes to the provided image. Follow the specification precis
 				videoFile,
 				{
 					interval: frameInterval,
-					maxFrames,
+					maxFrames: maxFrames || undefined,
 				},
 			);
 			
@@ -147,7 +147,10 @@ Apply these exact changes to the provided image. Follow the specification precis
 			});
 
 			setExtractedFrames(result.frames);
-			setCurrentStep("preview-frames");
+			
+			// Skip preview-frames and go directly to editing
+			console.log(`[VIDEO-EDITOR] 🚀 Skipping preview, going directly to editing step`);
+			setCurrentStep("editing");
 			
 			console.log(`[VIDEO-EDITOR] 🎯 Frame extraction pipeline completed in ${Date.now() - startTime}ms`);
 		} catch (err) {
@@ -325,7 +328,7 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 				});
 			}
 
-			// Step 3: Reassemble video
+			// Step 3: Reassemble video with validation and retry logic
 			console.log(`[VIDEO-EDITOR] 🎥 Starting video reassembly...`);
 			setCurrentStep("reassembling");
 
@@ -337,14 +340,68 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 
 			console.log(`[VIDEO-EDITOR] Using ${allEditedFrames.length} frames for reassembly (vs ${editedFrames.length} in state)`);
 
+			// Validate URLs before attempting reassembly
+			console.log(`[VIDEO-EDITOR] 🔍 Validating frame URLs before reassembly...`);
+			const urlValidationPromises = editedFramesForReassembly.slice(0, 3).map(async (frame, index) => {
+				try {
+					const response = await fetch(frame.url, { method: 'HEAD' });
+					const isValid = response.ok;
+					console.log(`[VIDEO-EDITOR] Frame ${frame.index} URL validation: ${isValid ? '✅' : '❌'} (${response.status})`);
+					return isValid;
+				} catch (error) {
+					console.log(`[VIDEO-EDITOR] Frame ${frame.index} URL validation: ❌ (${error})`);
+					return false;
+				}
+			});
+
+			const validationResults = await Promise.all(urlValidationPromises);
+			const allUrlsValid = validationResults.every(result => result);
+
+			if (!allUrlsValid) {
+				console.warn(`[VIDEO-EDITOR] ⚠️ Some URLs appear invalid, but proceeding with reassembly attempt...`);
+			}
+
 			console.log(`[VIDEO-EDITOR] Calling video reassembly API with ${editedFramesForReassembly.length} frames...`);
 			const reassemblyStart = Date.now();
 
-			const videoProcessor = createVideoProcessor();
-			const editedVideo = await videoProcessor.reassembleVideo(editedFramesForReassembly, {
-				fps: 30,
-				outputFormat: "mp4",
-			});
+			let editedVideo;
+			let reassemblyAttempt = 1;
+			const maxRetries = 2;
+
+			while (reassemblyAttempt <= maxRetries) {
+				try {
+					console.log(`[VIDEO-EDITOR] Reassembly attempt ${reassemblyAttempt}/${maxRetries}...`);
+					const videoProcessor = createVideoProcessor();
+					editedVideo = await videoProcessor.reassembleVideo(editedFramesForReassembly, {
+						fps: 30,
+						outputFormat: "mp4",
+					});
+					break; // Success, exit retry loop
+				} catch (error) {
+					console.error(`[VIDEO-EDITOR] ❌ Reassembly attempt ${reassemblyAttempt} failed:`, error);
+					
+					if (reassemblyAttempt === maxRetries) {
+						// Last attempt failed, handle gracefully
+						console.error(`[VIDEO-EDITOR] ❌ All reassembly attempts failed. URLs may have expired.`);
+						setProgress({
+							current: extractedFrames.length + 2,
+							total: extractedFrames.length + 2,
+							status: "processing",
+							message: "Automatic assembly failed. Please use manual assembly button.",
+						});
+						
+						// Don't throw error, just stop automatic flow and show manual controls
+						console.log(`[VIDEO-EDITOR] 🔄 Falling back to manual assembly mode`);
+						setCurrentStep("editing");
+						setIsProcessing(false);
+						return; // Exit the function early
+					}
+					
+					reassemblyAttempt++;
+					// Wait a bit before retrying
+					await new Promise(resolve => setTimeout(resolve, 1000));
+				}
+			}
 
 			console.log(`[VIDEO-EDITOR] ✅ Video reassembly completed in ${Date.now() - reassemblyStart}ms`);
 			console.log(`[VIDEO-EDITOR] Final video size: ${(editedVideo.size / (1024 * 1024)).toFixed(2)} MB`);
@@ -491,14 +548,11 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 	};
 
 	return (
-		<div className="w-full max-w-7xl mx-auto p-6">
-			<div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg">
+		<div className="w-full h-screen">
+			<div className="bg-white dark:bg-gray-800 h-full">
 				{/* Progress Steps Header */}
 				<div className="border-b border-gray-200 dark:border-gray-700 p-6">
-					<div className="flex items-center justify-between mb-4">
-						<h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-							AI Video Editor
-						</h2>
+					<div className="flex items-center justify-end mb-4">
 						<button
 							onClick={onCancel}
 							className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
@@ -547,13 +601,13 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 					</div>
 				</div>
 
-				<div className="p-6">
+				<div className="p-6 h-full overflow-auto">
 					{/* Step 1: Setup */}
 					{currentStep === "setup" && (
 						<div className="space-y-6">
 							<div>
 								<label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-									Edit Prompt
+									Describe your edits
 								</label>
 								<textarea
 									value={prompt}
@@ -564,35 +618,70 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 								/>
 							</div>
 
-							<div className="grid grid-cols-2 gap-4">
-								<div>
-									<label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-										Frame Interval (extract every N frames)
-									</label>
-									<input
-										type="number"
-										min="1"
-										max="60"
-										value={frameInterval}
-										onChange={(e) => setFrameInterval(Number(e.target.value))}
-										className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-gray-100"
-									/>
-								</div>
-
-								<div>
-									<label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-										Max Frames to Process
-									</label>
-									<input
-										type="number"
-										min="1"
-										max="100"
-										value={maxFrames}
-										onChange={(e) => setMaxFrames(Number(e.target.value))}
-										className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-gray-100"
-									/>
-								</div>
+							{/* Advanced Settings Toggle */}
+							<div>
+								<button
+									type="button"
+									onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+									className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+								>
+									<span>Advanced Settings</span>
+									<svg 
+										className={`h-4 w-4 transition-transform ${showAdvancedSettings ? 'rotate-180' : ''}`} 
+										fill="none" 
+										stroke="currentColor" 
+										viewBox="0 0 24 24"
+									>
+										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+									</svg>
+								</button>
 							</div>
+
+							{/* Advanced Settings Panel */}
+							{showAdvancedSettings && (
+								<div className="grid grid-cols-2 gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
+									<div>
+										<label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+											Frame Interval (extract every N frames)
+										</label>
+										<input
+											type="number"
+											min="1"
+											max="60"
+											value={frameInterval}
+											onChange={(e) => setFrameInterval(Number(e.target.value))}
+											className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-gray-100"
+										/>
+									</div>
+
+									<div>
+										<label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+											Max Frames to Process
+										</label>
+										<div className="flex items-center gap-2">
+											<input
+												type="number"
+												min="1"
+												max="100"
+												value={maxFrames || ''}
+												onChange={(e) => setMaxFrames(e.target.value ? Number(e.target.value) : null)}
+												placeholder="Unlimited"
+												className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-gray-100"
+											/>
+											<button
+												type="button"
+												onClick={() => setMaxFrames(null)}
+												className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 whitespace-nowrap"
+											>
+												Unlimited
+											</button>
+										</div>
+										<p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+											Leave empty for unlimited frames
+										</p>
+									</div>
+								</div>
+							)}
 
 							<div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4">
 								<h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
