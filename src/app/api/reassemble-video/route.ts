@@ -44,46 +44,49 @@ export async function POST(request: NextRequest) {
 			console.log(`[REASSEMBLE-VIDEO] Temporary directory created`);
 		}
 
-		// Write all frame images to temporary directory
-		console.log(`[REASSEMBLE-VIDEO] Processing ${frames.length} frames...`);
-		const framePaths: string[] = [];
+		// Write all frame images to temporary directory in parallel
+		console.log(`[REASSEMBLE-VIDEO] Processing ${frames.length} frames in parallel...`);
 		const frameProcessingStart = Date.now();
 
-		for (let i = 0; i < frames.length; i++) {
+		const processFrame = async (frame: any, index: number) => {
 			const frameStart = Date.now();
-			const frame = frames[i];
-			const frameFilename = `frame_${i.toString().padStart(4, "0")}.png`;
-			const framePath = join(tempDir, frameFilename);
+			const frameFilename = `frame_${index.toString().padStart(4, "0")}.png`;
+			const framePath = join(tempDir!, frameFilename);
 
-			console.log(`[REASSEMBLE-VIDEO] Processing frame ${i + 1}/${frames.length}: ${frameFilename}`);
+			console.log(`[REASSEMBLE-VIDEO] Processing frame ${index + 1}/${frames.length}: ${frameFilename}`);
 
 			// Convert base64 or URL back to buffer
 			let frameBuffer: Buffer;
 			if (frame.base64) {
-				console.log(`[REASSEMBLE-VIDEO] Converting frame ${i + 1} from base64...`);
+				console.log(`[REASSEMBLE-VIDEO] Converting frame ${index + 1} from base64...`);
 				// Remove data:image/png;base64, prefix if present
 				const base64Data = frame.base64.replace(/^data:image\/[a-z]+;base64,/, "");
 				frameBuffer = Buffer.from(base64Data, "base64");
 			} else if (frame.url) {
-				console.log(`[REASSEMBLE-VIDEO] Fetching frame ${i + 1} from URL: ${frame.url.substring(0, 100)}...`);
+				console.log(`[REASSEMBLE-VIDEO] Fetching frame ${index + 1} from URL: ${frame.url.substring(0, 100)}...`);
 				// If it's a URL, fetch the image
 				const fetchStart = Date.now();
 				const response = await fetch(frame.url);
 				if (!response.ok) {
-					console.error(`[REASSEMBLE-VIDEO] Failed to fetch frame ${i + 1}: ${response.statusText}`);
+					console.error(`[REASSEMBLE-VIDEO] Failed to fetch frame ${index + 1}: ${response.statusText}`);
 					throw new Error(`Failed to fetch frame image: ${response.statusText}`);
 				}
 				frameBuffer = Buffer.from(await response.arrayBuffer());
-				console.log(`[REASSEMBLE-VIDEO] Frame ${i + 1} fetched in ${Date.now() - fetchStart}ms (${frameBuffer.length} bytes)`);
+				console.log(`[REASSEMBLE-VIDEO] Frame ${index + 1} fetched in ${Date.now() - fetchStart}ms (${frameBuffer.length} bytes)`);
 			} else {
-				console.error(`[REASSEMBLE-VIDEO] Invalid frame data at index ${i}`);
-				throw new Error(`Invalid frame data at index ${i}`);
+				console.error(`[REASSEMBLE-VIDEO] Invalid frame data at index ${index}`);
+				throw new Error(`Invalid frame data at index ${index}`);
 			}
 
 			await writeFile(framePath, frameBuffer);
-			framePaths.push(framePath);
-			console.log(`[REASSEMBLE-VIDEO] Frame ${i + 1} written to disk in ${Date.now() - frameStart}ms`);
-		}
+			console.log(`[REASSEMBLE-VIDEO] Frame ${index + 1} written to disk in ${Date.now() - frameStart}ms`);
+			return framePath;
+		};
+
+		// Process all frames in parallel
+		const framePaths = await Promise.all(
+			frames.map((frame, index) => processFrame(frame, index))
+		);
 
 		console.log(`[REASSEMBLE-VIDEO] All ${frames.length} frames processed in ${Date.now() - frameProcessingStart}ms`);
 
@@ -106,21 +109,31 @@ export async function POST(request: NextRequest) {
 		const videoBuffer = await readFile(tempVideoPath);
 		console.log(`[REASSEMBLE-VIDEO] Video file read in ${Date.now() - readStart}ms (${videoBuffer.length} bytes = ${(videoBuffer.length / (1024 * 1024)).toFixed(2)} MB)`);
 
-		// Clean up temporary files
-		console.log(`[REASSEMBLE-VIDEO] Starting cleanup...`);
+		// Clean up temporary files in parallel
+		console.log(`[REASSEMBLE-VIDEO] Starting parallel cleanup...`);
 		const cleanupStart = Date.now();
 		try {
-			// Remove frame files
-			console.log(`[REASSEMBLE-VIDEO] Removing ${framePaths.length} frame files...`);
-			for (const framePath of framePaths) {
-				await unlink(framePath);
-			}
+			// Remove frame files in parallel
+			console.log(`[REASSEMBLE-VIDEO] Removing ${framePaths.length} frame files in parallel...`);
+			const frameCleanupPromises = framePaths.map(framePath => 
+				unlink(framePath).catch(err => 
+					console.warn(`[REASSEMBLE-VIDEO] Failed to remove frame ${framePath}:`, err)
+				)
+			);
+			
 			// Remove video file
-			if (tempVideoPath) {
-				await unlink(tempVideoPath);
-				console.log(`[REASSEMBLE-VIDEO] Removed video file: ${tempVideoPath}`);
-			}
-			// Remove temporary directory
+			const videoCleanupPromise = tempVideoPath 
+				? unlink(tempVideoPath).then(() => 
+					console.log(`[REASSEMBLE-VIDEO] Removed video file: ${tempVideoPath}`)
+				).catch(err => 
+					console.warn(`[REASSEMBLE-VIDEO] Failed to remove video file:`, err)
+				)
+				: Promise.resolve();
+			
+			// Wait for all file deletions to complete
+			await Promise.all([...frameCleanupPromises, videoCleanupPromise]);
+			
+			// Remove temporary directory (after all files are deleted)
 			if (tempDir) {
 				await unlink(tempDir);
 				console.log(`[REASSEMBLE-VIDEO] Removed temporary directory: ${tempDir}`);
@@ -148,21 +161,40 @@ export async function POST(request: NextRequest) {
 		const totalTime = Date.now() - startTime;
 		console.error(`[REASSEMBLE-VIDEO] ❌ ERROR after ${totalTime}ms:`, error);
 
-		// Clean up on error
+		// Clean up on error with parallel processing
 		console.log("[REASSEMBLE-VIDEO] Performing error cleanup...");
 		try {
+			const cleanupPromises: Promise<void>[] = [];
+			
+			// Clean up video file
 			if (tempVideoPath) {
-				await unlink(tempVideoPath);
-				console.log(`[REASSEMBLE-VIDEO] Cleaned up video file: ${tempVideoPath}`);
+				cleanupPromises.push(
+					unlink(tempVideoPath)
+						.then(() => console.log(`[REASSEMBLE-VIDEO] Cleaned up video file: ${tempVideoPath}`))
+						.catch(err => console.warn(`[REASSEMBLE-VIDEO] Failed to clean up video file:`, err))
+				);
 			}
+			
+			// Clean up temp directory files
 			if (tempDir && existsSync(tempDir)) {
-				// Clean up any files in the temp directory
 				const { readdirSync } = require("fs");
 				const files = readdirSync(tempDir);
-				console.log(`[REASSEMBLE-VIDEO] Cleaning up ${files.length} files in temp directory...`);
-				for (const file of files) {
-					await unlink(join(tempDir, file));
-				}
+				console.log(`[REASSEMBLE-VIDEO] Cleaning up ${files.length} files in temp directory in parallel...`);
+				
+				// Add parallel file cleanup promises
+				files.forEach(file => {
+					cleanupPromises.push(
+						unlink(join(tempDir, file))
+							.catch(err => console.warn(`[REASSEMBLE-VIDEO] Failed to clean up file ${file}:`, err))
+					);
+				});
+			}
+			
+			// Wait for all file cleanups
+			await Promise.all(cleanupPromises);
+			
+			// Remove temp directory after all files are cleaned
+			if (tempDir && existsSync(tempDir)) {
 				await unlink(tempDir);
 				console.log(`[REASSEMBLE-VIDEO] Cleaned up temp directory: ${tempDir}`);
 			}
