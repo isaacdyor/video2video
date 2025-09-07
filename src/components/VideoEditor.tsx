@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createVideoProcessor, type ExtractedFrame } from "@/lib/video-processor";
 import { createGeminiEditor, type EditProgress, type EditedFrame } from "@/lib/gemini-editor";
 
@@ -39,6 +39,9 @@ export default function VideoEditor({
 	const [originalVideoUrl] = useState<string>(() =>
 		URL.createObjectURL(videoFile),
 	);
+	
+	// Ref for auto-scrolling
+	const framesContainerRef = useRef<HTMLDivElement>(null);
 
 	// Auto-advance from preview-frames to editing when frames are extracted
 	useEffect(() => {
@@ -51,6 +54,25 @@ export default function VideoEditor({
 			return () => clearTimeout(timer);
 		}
 	}, [currentStep, extractedFrames.length, isProcessing]);
+
+	// Auto-scroll to the latest edited frame
+	useEffect(() => {
+		if (currentStep === "editing" && framesContainerRef.current && editedFrames.length > 0) {
+			// Find the latest edited frame (highest index)
+			const latestEditedFrame = editedFrames.reduce((latest, current) => 
+				current.index > latest.index ? current : latest
+			);
+			
+			// Find the corresponding DOM element for this frame
+			const frameElement = framesContainerRef.current.querySelector(`[data-frame-index="${latestEditedFrame.index}"]`);
+			if (frameElement) {
+				frameElement.scrollIntoView({ 
+					behavior: 'smooth', 
+					block: 'center' 
+				});
+			}
+		}
+	}, [editedFrames.length, currentStep]);
 
 	// Helper function to process a frame using the detailed diff specification
 	const processFrameWithDiff = async (
@@ -718,14 +740,17 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 								</div>
 
 								{/* Frame Comparison Grid - Two columns layout */}
-								<div className="max-h-96 overflow-y-auto p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+								<div 
+									ref={framesContainerRef}
+									className="max-h-96 overflow-y-auto p-4 bg-gray-50 dark:bg-gray-900 rounded-lg scroll-smooth"
+								>
 									<div className="space-y-4">
 										{extractedFrames.map((frame, index) => {
 											const editedFrame = editedFrames.find(ef => ef.index === frame.index);
 											const isCurrentlyEditing = currentEditingFrame === index;
 											
 											return (
-												<div key={frame.index} className="grid grid-cols-2 gap-4">
+												<div key={frame.index} data-frame-index={frame.index} className="grid grid-cols-2 gap-4">
 													{/* Original Image - Left Column */}
 													<div className="space-y-2">
 														<div className="relative">
