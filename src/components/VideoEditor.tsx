@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { createVideoProcessor, type ExtractedFrame } from "@/lib/video-processor";
 import { createGeminiEditor, type EditProgress, type EditedFrame } from "@/lib/gemini-editor";
 
@@ -39,6 +39,18 @@ export default function VideoEditor({
 	const [originalVideoUrl] = useState<string>(() =>
 		URL.createObjectURL(videoFile),
 	);
+
+	// Auto-advance from preview-frames to editing when frames are extracted
+	useEffect(() => {
+		if (currentStep === "preview-frames" && extractedFrames.length > 0 && !isProcessing) {
+			console.log(`[VIDEO-EDITOR] 🚀 Auto-advancing to editing step`);
+			const timer = setTimeout(() => {
+				handleProcessFrames();
+			}, 500);
+			
+			return () => clearTimeout(timer);
+		}
+	}, [currentStep, extractedFrames.length, isProcessing]);
 
 	// Helper function to process a frame using the detailed diff specification
 	const processFrameWithDiff = async (
@@ -152,6 +164,13 @@ Apply these exact changes to the provided image. Follow the specification precis
 		const startTime = Date.now();
 		console.log(`[VIDEO-EDITOR] 🚀 Starting NEW WORKFLOW: First frame → Diff analysis → Parallel processing`);
 		console.log(`[VIDEO-EDITOR] Processing ${extractedFrames.length} frames with prompt: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
+
+		// Safety check - ensure we have frames to process
+		if (!extractedFrames || extractedFrames.length === 0) {
+			console.error(`[VIDEO-EDITOR] ❌ Cannot process frames: no extracted frames available`);
+			setError("No frames available to process. Please extract frames first.");
+			return;
+		}
 
 		setIsProcessing(true);
 		setError(null);
@@ -698,81 +717,72 @@ This is the first frame - apply the requested change clearly and distinctly.`;
 									/>
 								</div>
 
-								{/* Frame Comparison Grid */}
-								<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 max-h-96 overflow-y-auto p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
-									{extractedFrames.map((frame, index) => {
-										const editedFrame = editedFrames.find(ef => ef.index === frame.index);
-										const isCurrentlyEditing = currentEditingFrame === index;
-										
-										return (
-											<div key={frame.index} className="space-y-2">
-												<div className="relative">
-													<img
-														src={frame.base64}
-														alt={`Original ${index + 1}`}
-														className={`w-full h-auto rounded border-2 ${
-															isCurrentlyEditing ? "border-yellow-500" : "border-gray-200 dark:border-gray-700"
-														}`}
-													/>
-													<span className="absolute top-1 left-1 text-xs bg-black bg-opacity-50 text-white px-1 rounded">
-														Original
-													</span>
-												</div>
-												
-												<div className="relative">
-													{editedFrame ? (
-														<img
-															src={editedFrame.editedUrl}
-															alt={`Edited ${index + 1}`}
-															className="w-full h-auto rounded border-2 border-green-500"
-														/>
-													) : isCurrentlyEditing ? (
-														<div className="w-full aspect-video bg-gray-200 dark:bg-gray-700 rounded border-2 border-yellow-500 flex items-center justify-center">
-															<svg className="animate-spin h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24">
-																<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-																<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-															</svg>
+								{/* Frame Comparison Grid - Two columns layout */}
+								<div className="max-h-96 overflow-y-auto p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+									<div className="space-y-4">
+										{extractedFrames.map((frame, index) => {
+											const editedFrame = editedFrames.find(ef => ef.index === frame.index);
+											const isCurrentlyEditing = currentEditingFrame === index;
+											
+											return (
+												<div key={frame.index} className="grid grid-cols-2 gap-4">
+													{/* Original Image - Left Column */}
+													<div className="space-y-2">
+														<div className="relative">
+															<img
+																src={frame.base64}
+																alt={`Original ${index + 1}`}
+																className={`w-full h-auto rounded border-2 ${
+																	isCurrentlyEditing ? "border-yellow-500" : "border-gray-200 dark:border-gray-700"
+																}`}
+															/>
+															<span className="absolute top-1 left-1 text-xs bg-black bg-opacity-50 text-white px-1 rounded">
+																Original
+															</span>
 														</div>
-													) : (
-														<div className="w-full aspect-video bg-gray-100 dark:bg-gray-800 rounded border-2 border-gray-200 dark:border-gray-700 flex items-center justify-center">
-															<span className="text-xs text-gray-400">Pending</span>
+														<div className="text-center text-xs text-gray-500 dark:text-gray-400">
+															Frame {index + 1} - Original
 														</div>
-													)}
-													{editedFrame && (
-														<span className="absolute top-1 left-1 text-xs bg-green-600 text-white px-1 rounded">
-															Edited
-														</span>
-													)}
+													</div>
+													
+													{/* Edited Image - Right Column */}
+													<div className="space-y-2">
+														<div className="relative">
+															{editedFrame ? (
+																<img
+																	src={editedFrame.editedUrl}
+																	alt={`Edited ${index + 1}`}
+																	className="w-full h-auto rounded border-2 border-green-500"
+																/>
+															) : isCurrentlyEditing ? (
+																<div className="w-full rounded border-2 border-yellow-500 flex items-center justify-center" style={{ aspectRatio: '16/9', minHeight: '100px' }}>
+																	<svg className="animate-spin h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24">
+																		<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+																		<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+																	</svg>
+																</div>
+															) : (
+																<div className="w-full rounded border-2 border-gray-200 dark:border-gray-700 flex items-center justify-center bg-gray-100 dark:bg-gray-800" style={{ aspectRatio: '16/9', minHeight: '100px' }}>
+																	<span className="text-xs text-gray-400">Pending</span>
+																</div>
+															)}
+															{editedFrame && (
+																<span className="absolute top-1 left-1 text-xs bg-green-600 text-white px-1 rounded">
+																	Edited
+																</span>
+															)}
+														</div>
+														<div className="text-center text-xs text-gray-500 dark:text-gray-400">
+															Frame {index + 1} - {editedFrame ? 'Edited' : isCurrentlyEditing ? 'Processing...' : 'Pending'}
+														</div>
+													</div>
 												</div>
-												
-												<div className="text-center text-xs text-gray-500 dark:text-gray-400">
-													Frame {index + 1}
-												</div>
-											</div>
-										);
-									})}
+											);
+										})}
+									</div>
 								</div>
 							</div>
 
-							{/* Show detailed diff if available */}
-							{detailedDiff && (
-								<div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
-									<h4 className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2 flex items-center gap-2">
-										🔍 Generated Detailed Specification
-									</h4>
-									<div className="text-xs text-blue-800 dark:text-blue-200 bg-white dark:bg-gray-800 p-3 rounded border max-h-40 overflow-y-auto">
-										<pre className="whitespace-pre-wrap font-mono text-xs">
-											{detailedDiff.length > 500 ? 
-												detailedDiff.substring(0, 500) + '\n\n... [truncated, full spec used for processing]' : 
-												detailedDiff
-											}
-										</pre>
-									</div>
-									<p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
-										This specification is being applied to all remaining frames in parallel.
-									</p>
-								</div>
-							)}
 
 							{/* Navigation Controls During Editing */}
 							{!isProcessing && (
